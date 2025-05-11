@@ -528,6 +528,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "ffmpeg-next",
+ "float-ord",
  "num_cpus",
  "plotters",
  "rayon",
