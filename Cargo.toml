@@ -1,0 +1,11 @@
+[package]
+name = "measure-hdr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = "1.23.0"
+ffmpeg-next = "7.1.0"
+num_cpus = "1.16.0"
+plotters = "0.3.7"
+rayon = "1.10.0"
