@@ -1,20 +1,13 @@
-use ffmpeg::{decoder, format, media, util::frame::video::Video};
+use ffmpeg::{format, media, util::frame::video::Video};
 use ffmpeg_next as ffmpeg;
 use float_ord::FloatOrd;
 use plotters::{
     coord::ranged1d::{KeyPointHint, NoDefaultFormatting, ValueFormatter},
     prelude::*,
 };
-use std::{
-    cmp::{max, min},
-    env,
-    ops::Range,
-    time::Instant,
-};
+use std::{env, ops::Range, time::Instant};
 
-use rayon::prelude::*;
-
-// Contants from the SMTPE 2084 PQ spec
+// Contants from the SMPTE 2084 PQ spec
 pub const ST2084_Y_MAX: f64 = 10000.0;
 pub const ST2084_M1: f64 = 2610.0 / 16384.0;
 pub const ST2084_M2: f64 = (2523.0 / 4096.0) * 128.0;
@@ -24,6 +17,7 @@ pub const ST2084_C3: f64 = (2392.0 / 4096.0) * 32.0;
 
 const MAX_COLOUR: RGBColor = RGBColor(65, 105, 225);
 const AVERAGE_COLOUR: RGBColor = RGBColor(75, 0, 130);
+const MIN_COLOUR: RGBColor = BLACK;
 
 fn pq_to_nits(pq: f64) -> f64 {
     let pq = pq.clamp(0.0, 1.0);
@@ -34,13 +28,12 @@ fn pq_to_nits(pq: f64) -> f64 {
 
     n * ST2084_Y_MAX
 }
-pub fn pq_10bit_to_nits(pq_code_value: f64) -> f64 {
+
+fn yuv420_10bit_to_pq(sample: u16) -> f64 {
     const YUV420_10BIT_MAX: f64 = 1023.0;
-    let pq_code_value = pq_code_value.clamp(0.0, YUV420_10BIT_MAX);
+    let pq_code_value = (sample as f64).clamp(0.0, YUV420_10BIT_MAX);
 
-    let pq = pq_code_value / 1023.0;
-
-    pq_to_nits(pq)
+    pq_code_value / 1023.0
 }
 
 pub fn nits_to_pq(nits: f64) -> f64 {
@@ -59,14 +52,22 @@ struct FrameInfo {
 
 impl FrameInfo {
     fn parse_frame(frame: &[u16]) -> Self {
-        let min_val = *frame.iter().min().unwrap();
-        let max_val = *frame.iter().max().unwrap();
-        let avg_val = frame.iter().map(|&x| x as f64).sum::<f64>() / frame.len() as f64;
+        let mut sum = 0;
+        let mut max = 0;
+        let mut min = u16::MAX;
+
+        for &sample in frame {
+            sum += sample as usize;
+            max = std::cmp::max(max, sample);
+            min = std::cmp::min(min, sample);
+        }
+
+        let avg = (sum / frame.len()) as u16;
 
         FrameInfo {
-            max: pq_10bit_to_nits(max_val as f64),
-            min: pq_10bit_to_nits(min_val as f64),
-            avg: pq_10bit_to_nits(avg_val),
+            max: yuv420_10bit_to_pq(max),
+            min: yuv420_10bit_to_pq(min),
+            avg: yuv420_10bit_to_pq(avg),
         }
     }
 }
@@ -103,7 +104,7 @@ fn main() -> Result<(), ffmpeg::Error> {
     let mut results: Vec<FrameInfo> = Vec::new();
     let mut last = Instant::now();
 
-    'outer: for (stream, packet) in ictx.packets() {
+    for (stream, packet) in ictx.packets() {
         if stream.index() == stream_index {
             decoder.send_packet(&packet)?;
 
@@ -123,18 +124,8 @@ fn main() -> Result<(), ffmpeg::Error> {
                     last = Instant::now();
                 }
 
-                if frame_count > 2000 {
-                    break 'outer;
-                }
-
                 // YUV420 10-bit (e.g., yuv420p10le)
                 let y_plane = bytemuck::cast_slice::<u8, u16>(decoded.data(0));
-
-                let maxcll = *y_plane.iter().max().unwrap();
-                let maxfall =
-                    (y_plane.iter().map(|x| *x as usize).sum::<usize>() / y_plane.len()) as u16;
-
-                assert!(maxfall <= maxcll);
 
                 let frameinfo = FrameInfo::parse_frame(y_plane);
 
@@ -154,12 +145,8 @@ fn main() -> Result<(), ffmpeg::Error> {
     plot(
         &results,
         std::path::Path::new("out.png"),
-        "SMTPE 2084 PQ Measurements Plot",
+        "SMPTE 2084 PQ Measurements Plot",
     );
-
-    for result in results {
-        dbg!(result);
-    }
 
     Ok(())
 }
@@ -238,39 +225,39 @@ fn plot(results: &[FrameInfo], output: &std::path::Path, title: &str) {
         .draw()
         .unwrap();
 
-    let maxfall = results.iter().map(|x| FloatOrd(x.avg)).max().unwrap().0;
-    let maxfall_avg = results.iter().map(|x| x.avg).sum::<f64>() / results.len() as f64;
+    let maxfall = pq_to_nits(results.iter().map(|x| FloatOrd(x.avg)).max().unwrap().0);
+    let maxfall_avg = pq_to_nits(results.iter().map(|x| x.avg).sum::<f64>() / results.len() as f64);
 
     let avg_series_label = format!(
         "Average (MaxFALL: {:.2} nits, avg: {:.2} nits)",
         maxfall, maxfall_avg
     );
 
-    let maxcll = results.iter().map(|x| FloatOrd(x.max)).max().unwrap().0;
-    let maxcll_avg = results.iter().map(|x| x.max).sum::<f64>() / results.len() as f64;
+    let maxcll = pq_to_nits(results.iter().map(|x| FloatOrd(x.max)).max().unwrap().0);
+    let maxcll_avg = pq_to_nits(results.iter().map(|x| x.max).sum::<f64>() / results.len() as f64);
 
     let max_series_label = format!(
         "Maximum (MaxCLL: {:.2} nits, avg: {:.2} nits)",
         maxcll, maxcll_avg,
     );
 
-    let max_min = results.iter().map(|x| FloatOrd(x.min)).max().unwrap().0;
+    let max_min = pq_to_nits(results.iter().map(|x| FloatOrd(x.min)).max().unwrap().0);
     let min_series_label = format!("Minimum (max: {:.6} nits)", max_min);
 
     let max_series = AreaSeries::new(
-        (0..).zip(results).map(|(x, y)| (x, nits_to_pq(y.max))),
+        (0..).zip(results).map(|(x, y)| (x, (y.max))),
         0.0,
         MAX_COLOUR.mix(0.25),
     )
     .border_style(MAX_COLOUR);
     let avg_series = AreaSeries::new(
-        (0..).zip(results).map(|(x, y)| (x, nits_to_pq(y.avg))),
+        (0..).zip(results).map(|(x, y)| (x, (y.avg))),
         0.0,
         AVERAGE_COLOUR.mix(0.25),
     )
     .border_style(AVERAGE_COLOUR);
     let min_series = AreaSeries::new(
-        (0..).zip(results).map(|(x, y)| (x, nits_to_pq(y.min))),
+        (0..).zip(results).map(|(x, y)| (x, (y.min))),
         0.0,
         BLACK.mix(0.25),
     )
@@ -314,7 +301,7 @@ fn plot(results: &[FrameInfo], output: &std::path::Path, title: &str) {
             PathElement::new(
                 vec![(x, y), (x + 20, y)],
                 ShapeStyle {
-                    color: BLACK.to_rgba(),
+                    color: MIN_COLOUR.to_rgba(),
                     filled: false,
                     stroke_width: 2,
                 },
@@ -323,7 +310,7 @@ fn plot(results: &[FrameInfo], output: &std::path::Path, title: &str) {
 
     chart
         .configure_series_labels()
-        .border_style(BLACK)
+        .border_style(MIN_COLOUR)
         .position(SeriesLabelPosition::LowerLeft)
         .label_font(("sans-serif", 24))
         .background_style(WHITE)
