@@ -85,10 +85,11 @@ fn main() -> Result<(), ffmpeg::Error> {
         .best(media::Type::Video)
         .ok_or(ffmpeg::Error::StreamNotFound)?;
 
-    let num_frames = ictx
+    let num_frames = input
         .metadata()
         .get("NUMBER_OF_FRAMES")
         .and_then(|x| x.parse::<u64>().ok());
+    let frame_rate = input.rate();
 
     let stream_index = input.index();
     let codec_params = input.parameters();
@@ -111,14 +112,18 @@ fn main() -> Result<(), ffmpeg::Error> {
             while decoder.receive_frame(&mut decoded).is_ok() {
                 frame_count += 1;
 
-                if frame_count % 100 == 0 {
+                if frame_count % 200 == 0 {
                     let dur = Instant::now() - last;
+                    let fps = 100.0 / dur.as_secs_f64();
+                    let x = fps / f64::from(frame_rate);
                     if let Some(num_frames) = num_frames {
-                        println!("{:02}%, last 100 took {:?}", frame_count / num_frames, dur);
+                        println!(
+                            "{:0.02}%, {:.02}fps ({:.03}x)",
+                            frame_count / num_frames,
+                            fps,
+                            x
+                        );
                     } else {
-                        let fps = 100.0 / dur.as_secs_f64();
-                        let x = fps / 24.0;
-
                         println!("last 100 frames {:.02}fps ({:.03}x)", fps, x);
                     }
                     last = Instant::now();
